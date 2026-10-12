@@ -225,3 +225,4 @@ int fsfs_inode_write(fsfs_mount_t *m, uint64_t ino, uint64_t off, void *buf, siz
   x->seq++;
   return 0;
 }
+
