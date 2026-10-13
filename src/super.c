@@ -44,9 +44,25 @@ static int fsfs_statfs(struct dentry *dentry, struct kstatfs *buf) {
   buf->f_namelen = FSFS_NAME_MAX;
   return 0;
 }
+static void fsfs_put_super(struct super_block *sb) {
+  struct fsfs_sb_info *sbi = FSFS_SB(sb);
+  int i;
+  if (!sbi) return;
+  for (i = 0; i < FSFS_MAX_SNAPS; i++) {
+    if (sbi->snap_ino[i]) { kvfree(sbi->snap_ino[i]); sbi->snap_ino[i] = NULL; }
+  }
+  if (sbi->inodes) kvfree(sbi->inodes);
+  if (sbi->blk_bmp) kvfree(sbi->blk_bmp);
+  if (sbi->blk_ref) kvfree(sbi->blk_ref);
+  if (sbi->snaps) kvfree(sbi->snaps);
+  if (sbi->journal) kvfree(sbi->journal);
+  sb->s_fs_info = NULL;
+  kfree(sbi);
+}
 static const struct super_operations fsfs_sops = {
   .alloc_inode = fsfs_alloc_inode,
   .free_inode = fsfs_free_inode,
+  .put_super = fsfs_put_super,
   .sync_fs = fsfs_sync_fs,
   .statfs = fsfs_statfs,
 };

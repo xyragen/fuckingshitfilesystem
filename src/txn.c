@@ -1,6 +1,7 @@
 #include "fsfs.h"
 #ifdef __KERNEL__
 #include <linux/string.h>
+#include <linux/slab.h>
 #include <linux/time.h>
 int fsfs_txn_begin(struct super_block *sb, fsfs_txn_t *t) {
   struct fsfs_sb_info *sbi = FSFS_SB(sb);
@@ -49,20 +50,33 @@ int fsfs_txn_commit(struct super_block *sb, fsfs_txn_t *t) {
   struct fsfs_sb_info *sbi = FSFS_SB(sb);
   int i;
   int j;
-  fsfs_inode_t bak[FSFS_TXN_MAX_OPS];
+  fsfs_inode_t *bak;
   __u64 bina[FSFS_TXN_MAX_OPS];
   int nbak = 0;
+  int rc = -1;
   if (!t) return -1;
   if (t->state != FSFS_TXN_ACTIVE) return -1;
+  bak = kvzalloc(sizeof(fsfs_inode_t) * FSFS_TXN_MAX_OPS, GFP_NOFS);
+  if (!bak) return -ENOMEM;
   for (i = 0; i < t->n_ops; i++) {
     fsfs_jrec_t *r = &t->ops[i];
     __u32 c = fsfs_crc32c(r->data, r->len);
-    if (c != r->crc) { fsfs_txn_abort(sb, t); return -1; }
-    if (fsfs_journal_append(sb, r) != 0) { fsfs_txn_abort(sb, t); return -1; }
+    if (c != r->crc) { fsfs_txn_abort(sb, t); goto out; }
+    r->txn = t->id;
+    r->op = (r->op == FSFS_JOP_CREATE) ? FSFS_JOP_CREATE : FSFS_JOP_WRITE;
+    if (fsfs_journal_append(sb, r) != 0) { fsfs_txn_abort(sb, t); goto out; }
+  }
+  {
+    fsfs_jrec_t *cm = kvzalloc(sizeof(fsfs_jrec_t), GFP_NOFS);
+    if (!cm) { fsfs_txn_abort(sb, t); goto out; }
+    cm->txn = t->id;
+    cm->op = FSFS_JOP_COMMIT;
+    if (fsfs_journal_append(sb, cm) != 0) { kvfree(cm); fsfs_txn_abort(sb, t); goto out; }
+    kvfree(cm);
   }
   for (i = 0; i < t->n_ops; i++) {
     fsfs_jrec_t *r = &t->ops[i];
-    if (r->op == 1) {
+    if (r->op == FSFS_JOP_WRITE) {
       __u64 ino = r->a;
       if (ino < FSFS_MAX_INODES && sbi->inodes[ino].ino) {
         bina[nbak] = ino;
@@ -70,26 +84,29 @@ int fsfs_txn_commit(struct super_block *sb, fsfs_txn_t *t) {
         if (fsfs_inode_write(sb, ino, r->b, r->data, r->len) != 0) {
           for (j = 0; j < nbak - 1; j++) sbi->inodes[bina[j]] = bak[j];
           t->state = FSFS_TXN_ABORTED;
-          return -1;
+          goto out;
         }
       }
-    } else if (r->op == 2) {
+    } else if (r->op == FSFS_JOP_CREATE) {
       __u64 ni = fsfs_inode_create(sb, (__u32)r->b, 0);
       if (ni == 0) {
         for (j = 0; j < nbak; j++) sbi->inodes[bina[j]] = bak[j];
         t->state = FSFS_TXN_ABORTED;
-        return -1;
+        goto out;
       }
       if (fsfs_dir_add(sb, r->a, (char *)r->data, ni, 1) != 0) {
         for (j = 0; j < nbak; j++) sbi->inodes[bina[j]] = bak[j];
         sbi->inodes[ni].dead = 1;
         t->state = FSFS_TXN_ABORTED;
-        return -1;
+        goto out;
       }
     }
   }
   t->state = FSFS_TXN_COMMITTED;
-  return 0;
+  rc = 0;
+out:
+  kvfree(bak);
+  return rc;
 }
 int fsfs_txn_abort(struct super_block *sb, fsfs_txn_t *t) {
   if (!t) return -1;

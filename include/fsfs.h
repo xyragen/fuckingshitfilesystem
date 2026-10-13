@@ -48,6 +48,9 @@ extern "C" {
 #define FSFS_TXN_ACTIVE 1
 #define FSFS_TXN_COMMITTED 2
 #define FSFS_TXN_ABORTED 3
+#define FSFS_JOP_WRITE 1
+#define FSFS_JOP_CREATE 2
+#define FSFS_JOP_COMMIT 3
 #define FSFS_IOC_MAGIC 0xCF
 #define FSFS_IOC_SNAP_CREATE _IOWR(FSFS_IOC_MAGIC, 1, struct fsfs_ioc_snap)
 #define FSFS_IOC_SNAP_DELETE _IOW(FSFS_IOC_MAGIC, 2, __u64)
@@ -186,6 +189,7 @@ typedef struct {
 } fsfs_super_t;
 typedef struct {
   __u64 seq;
+  __u64 txn;
   __u32 op;
   __u32 len;
   __u64 a;
@@ -207,6 +211,7 @@ struct fsfs_sb_info {
   __u32 *blk_ref;
   fsfs_inode_t *inodes;
   fsfs_snap_t *snaps;
+  fsfs_inode_t *snap_ino[FSFS_MAX_SNAPS];
   __u8 *journal;
   struct mutex lock;
   __u64 cur_gen;

@@ -101,8 +101,11 @@ int fsfs_inode_read(struct super_block *sb, __u64 ino, __u64 off, void *buf, siz
   struct fsfs_sb_info *sbi = FSFS_SB(sb);
   fsfs_inode_t *x;
   __u8 *p;
+  __u8 *ob;
+  __u8 *dd;
   size_t done = 0;
   size_t left;
+  int rc = -1;
   if (!buf) return -1;
   if (ino >= FSFS_MAX_INODES) return -1;
   x = &sbi->inodes[ino];
@@ -113,6 +116,9 @@ int fsfs_inode_read(struct super_block *sb, __u64 ino, __u64 off, void *buf, siz
     memcpy(buf, x->inline_buf + off, n);
     return (int)n;
   }
+  ob = kvmalloc(FSFS_BLOCK * 2, GFP_NOFS);
+  if (!ob) return -ENOMEM;
+  dd = ob + FSFS_BLOCK;
   p = (__u8 *)buf;
   left = n;
   while (left > 0) {
@@ -122,23 +128,25 @@ int fsfs_inode_read(struct super_block *sb, __u64 ino, __u64 off, void *buf, siz
     size_t chunk = FSFS_BLOCK - (size_t)inblk;
     __u32 k;
     int f = -1;
-    __u8 ob[FSFS_BLOCK];
     if (chunk > left) chunk = left;
     for (k = 0; k < x->n_exts; k++) if (x->exts[k].l_off == blkoff) { f = (int)k; break; }
     if (f < 0) { memset(p + done, 0, chunk); }
     else {
-      if (fsfs_blk_read(sb, x->exts[f].p_blk, ob) != 0) memset(ob, 0, FSFS_BLOCK);
+      if (fsfs_blk_read(sb, x->exts[f].p_blk, ob) != 0) goto out;
       if (x->exts[f].comp != FSFS_COMP_NONE) {
-        __u8 dd[FSFS_BLOCK];
         int dl = fsfs_decompress_blk(ob, FSFS_BLOCK, dd, FSFS_BLOCK, x->exts[f].comp);
-        if (dl > 0) memcpy(p + done, dd + inblk, chunk);
-        else memcpy(p + done, ob + inblk, chunk);
+        if (dl < 0) goto out;
+        memset(dd + dl, 0, FSFS_BLOCK - dl);
+        memcpy(p + done, dd + inblk, chunk);
       } else memcpy(p + done, ob + inblk, chunk);
     }
     done += chunk;
     left -= chunk;
   }
-  return (int)n;
+  rc = (int)n;
+out:
+  kvfree(ob);
+  return rc;
 }
 static int fsfs_inode_write_small(struct super_block *sb, __u64 ino, __u64 off, void *buf, size_t n) {
   struct fsfs_sb_info *sbi = FSFS_SB(sb);
@@ -155,14 +163,26 @@ int fsfs_inode_write(struct super_block *sb, __u64 ino, __u64 off, void *buf, si
   struct fsfs_sb_info *sbi = FSFS_SB(sb);
   fsfs_inode_t *x;
   __u8 *p;
+  __u8 *scratch;
+  __u8 *blk;
+  __u8 *ob;
+  __u8 *dd;
+  __u8 *cb;
   size_t left;
   size_t done = 0;
+  int rc = -1;
   if (!buf) return -1;
   if (ino >= FSFS_MAX_INODES) return -1;
   x = &sbi->inodes[ino];
   if (x->ino == 0 || x->dead) return -1;
   if (x->is_dir) return -1;
   if (off + n <= FSFS_INLINE_SZ && x->n_exts == 0) return fsfs_inode_write_small(sb, ino, off, buf, n);
+  scratch = kvmalloc(FSFS_BLOCK * 4, GFP_NOFS);
+  if (!scratch) return -ENOMEM;
+  blk = scratch;
+  ob = scratch + FSFS_BLOCK;
+  dd = scratch + FSFS_BLOCK * 2;
+  cb = scratch + FSFS_BLOCK * 3;
   if (x->inline_used && x->n_exts == 0) {
     __u8 tmp[FSFS_INLINE_SZ];
     size_t osz = (size_t)x->size;
@@ -170,16 +190,15 @@ int fsfs_inode_write(struct super_block *sb, __u64 ino, __u64 off, void *buf, si
     memset(x->inline_buf, 0, FSFS_INLINE_SZ);
     x->inline_used = 0;
     x->size = 0;
-    if (fsfs_extent_alloc_for(sb, ino, 0, FSFS_BLOCK, -1) != 0) return -1;
+    if (fsfs_extent_alloc_for(sb, ino, 0, FSFS_BLOCK, -1) != 0) goto out;
     if (osz > 0) {
       __u32 kk;
       int ff = -1;
-      __u8 blk[FSFS_BLOCK];
       for (kk = 0; kk < x->n_exts; kk++) if (x->exts[kk].l_off == 0) ff = kk;
       if (ff >= 0) {
         memset(blk, 0, FSFS_BLOCK);
         memcpy(blk, tmp, osz);
-        fsfs_blk_write(sb, x->exts[ff].p_blk, blk);
+        if (fsfs_blk_write(sb, x->exts[ff].p_blk, blk) != 0) goto out;
         x->exts[ff].crc = fsfs_crc32c(blk, FSFS_BLOCK);
       }
       x->size = osz;
@@ -194,31 +213,29 @@ int fsfs_inode_write(struct super_block *sb, __u64 ino, __u64 off, void *buf, si
     size_t chunk = FSFS_BLOCK - (size_t)inblk;
     __u32 k;
     int f = -1;
-    __u8 blk[FSFS_BLOCK];
-    __u8 ob[FSFS_BLOCK];
     if (chunk > left) chunk = left;
     for (k = 0; k < x->n_exts; k++) if (x->exts[k].l_off == blkoff) { f = (int)k; break; }
     if (f < 0) {
-      if (fsfs_extent_alloc_for(sb, ino, blkoff, FSFS_BLOCK, -1) != 0) return -1;
+      if (fsfs_extent_alloc_for(sb, ino, blkoff, FSFS_BLOCK, -1) != 0) goto out;
       for (k = 0; k < x->n_exts; k++) if (x->exts[k].l_off == blkoff) { f = (int)k; break; }
-      if (f < 0) return -1;
+      if (f < 0) goto out;
     } else {
-      if (fsfs_extent_cow(sb, ino, blkoff) != 0) return -1;
+      if (fsfs_extent_cow(sb, ino, blkoff) != 0) goto out;
     }
-    if (fsfs_blk_read(sb, x->exts[f].p_blk, ob) != 0) memset(ob, 0, FSFS_BLOCK);
+    if (fsfs_blk_read(sb, x->exts[f].p_blk, ob) != 0) goto out;
     if (x->exts[f].comp != FSFS_COMP_NONE) {
-      __u8 dd[FSFS_BLOCK];
       int dl = fsfs_decompress_blk(ob, FSFS_BLOCK, dd, FSFS_BLOCK, x->exts[f].comp);
-      if (dl > 0) { memset(blk, 0, FSFS_BLOCK); memcpy(blk, dd, dl < FSFS_BLOCK ? dl : FSFS_BLOCK); }
-      else memcpy(blk, ob, FSFS_BLOCK);
+      if (dl < 0) goto out;
+      memset(dd + dl, 0, FSFS_BLOCK - dl);
+      memset(blk, 0, FSFS_BLOCK);
+      memcpy(blk, dd, dl < FSFS_BLOCK ? dl : FSFS_BLOCK);
     } else memcpy(blk, ob, FSFS_BLOCK);
     memcpy(blk + inblk, p + done, chunk);
     if (x->exts[f].comp != FSFS_COMP_NONE) {
-      __u8 cb[FSFS_BLOCK];
       int cl = fsfs_compress_blk(blk, FSFS_BLOCK, cb, FSFS_BLOCK, x->exts[f].comp);
-      if (cl > 0) { memset(ob, 0, FSFS_BLOCK); memcpy(ob, cb, cl); fsfs_blk_write(sb, x->exts[f].p_blk, ob); }
-      else { x->exts[f].comp = FSFS_COMP_NONE; fsfs_blk_write(sb, x->exts[f].p_blk, blk); }
-    } else fsfs_blk_write(sb, x->exts[f].p_blk, blk);
+      if (cl > 0) { memset(ob, 0, FSFS_BLOCK); memcpy(ob, cb, cl); if (fsfs_blk_write(sb, x->exts[f].p_blk, ob) != 0) goto out; }
+      else { x->exts[f].comp = FSFS_COMP_NONE; if (fsfs_blk_write(sb, x->exts[f].p_blk, blk) != 0) goto out; }
+    } else if (fsfs_blk_write(sb, x->exts[f].p_blk, blk) != 0) goto out;
     x->exts[f].crc = fsfs_crc32c(blk, FSFS_BLOCK);
     fsfs_sha256(blk, FSFS_BLOCK, x->exts[f].merkle);
     done += chunk;
@@ -227,7 +244,10 @@ int fsfs_inode_write(struct super_block *sb, __u64 ino, __u64 off, void *buf, si
   if (off + n > x->size) x->size = off + n;
   x->mtime = fsfs_now2();
   x->seq++;
-  return 0;
+  rc = 0;
+out:
+  kvfree(scratch);
+  return rc;
 }
 #endif
 

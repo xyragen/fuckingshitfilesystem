@@ -1,16 +1,22 @@
 #include "fsfs.h"
 #ifdef __KERNEL__
 #include <linux/string.h>
+#include <linux/slab.h>
 int fsfs_scrub_block(struct super_block *sb, __u64 blk) {
   struct fsfs_sb_info *sbi = FSFS_SB(sb);
-  __u8 b[FSFS_BLOCK];
+  __u8 *b;
+  __u8 *dd;
   __u32 c;
   int i;
   int found = 0;
   __u32 want = 0;
+  int rc = -1;
   if (blk >= sbi->super.total_blocks) return -1;
   if (!sbi->blk_bmp[blk]) return 0;
-  if (fsfs_blk_read(sb, blk, b) != 0) return -1;
+  b = kvmalloc(FSFS_BLOCK * 2, GFP_NOFS);
+  if (!b) return -ENOMEM;
+  dd = b + FSFS_BLOCK;
+  if (fsfs_blk_read(sb, blk, b) != 0) goto out;
   c = fsfs_crc32c(b, FSFS_BLOCK);
   for (i = 0; i < FSFS_MAX_INODES; i++) {
     fsfs_inode_t *x = &sbi->inodes[i];
@@ -18,15 +24,14 @@ int fsfs_scrub_block(struct super_block *sb, __u64 blk) {
     if (x->ino == 0) continue;
     for (k = 0; k < x->n_exts; k++) {
       if (x->exts[k].p_blk == blk) {
-        __u8 dd[FSFS_BLOCK];
         found = 1;
         if (x->exts[k].comp != FSFS_COMP_NONE) {
           int dl = fsfs_decompress_blk(b, FSFS_BLOCK, dd, FSFS_BLOCK, x->exts[k].comp);
-          if (dl < 0) return -1;
+          if (dl < 0) goto out;
           want = fsfs_crc32c(dd, FSFS_BLOCK);
         } else {
           want = x->exts[k].crc;
-          if (c != want) return -1;
+          if (c != want) goto out;
           x->exts[k].verified = 1;
         }
         break;
@@ -35,10 +40,13 @@ int fsfs_scrub_block(struct super_block *sb, __u64 blk) {
     if (found) break;
   }
   if (!found) {
-    if (c == 0xFFFFFFFFU) return -1;
+    if (c == 0xFFFFFFFFU) goto out;
   }
   sbi->super.scrub_seq++;
-  return 0;
+  rc = 0;
+out:
+  kvfree(b);
+  return rc;
 }
 int fsfs_scrub_inode(struct super_block *sb, __u64 ino) {
   struct fsfs_sb_info *sbi = FSFS_SB(sb);
