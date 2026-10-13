@@ -1,17 +1,23 @@
 #include "fsfs.h"
-#include <string.h>
-int fsfs_btree_insert(fsfs_mount_t *m, uint64_t dino, char *name, uint64_t child, uint8_t type) {
+#ifdef __KERNEL__
+#include <linux/string.h>
+#include <linux/time.h>
+static __u64 fsfs_now(void) {
+  return (__u64)ktime_get_real_seconds();
+}
+int fsfs_btree_insert(struct super_block *sb, __u64 dino, char *name, __u64 child, __u8 type) {
+  struct fsfs_sb_info *sbi = FSFS_SB(sb);
   fsfs_inode_t *d;
-  uint8_t *base;
+  __u8 *base;
   int cap;
   int n;
   int i;
   int pos;
   fsfs_dirent_t e;
   fsfs_dirent_t *arr;
-  if (!m || !name) return -1;
+  if (!name) return -1;
   if (dino >= FSFS_MAX_INODES) return -1;
-  d = &m->inodes[dino];
+  d = &sbi->inodes[dino];
   if (d->ino == 0 || !d->is_dir) return -1;
   base = d->inline_buf;
   cap = FSFS_INLINE_SZ / sizeof(fsfs_dirent_t);
@@ -30,25 +36,27 @@ int fsfs_btree_insert(fsfs_mount_t *m, uint64_t dino, char *name, uint64_t child
   e.ino = child;
   e.parent = dino;
   e.type = type;
-  e.nlen = (uint8_t)strlen(name);
-  strncpy(e.name, name, FSFS_NAME_MAX - 1);
+  e.nlen = (__u8)strlen(name);
+  memcpy(e.name, name, e.nlen < FSFS_NAME_MAX - 1 ? e.nlen : FSFS_NAME_MAX - 1);
+  e.name[FSFS_NAME_MAX - 1] = 0;
   for (i = n; i > pos; i--) arr[i] = arr[i - 1];
   arr[pos] = e;
   d->size += sizeof(fsfs_dirent_t);
-  d->mtime = (uint64_t)time(0);
+  d->mtime = fsfs_now();
   d->seq++;
   d->crc_meta = fsfs_crc32c(d, 128);
   return 0;
 }
-int fsfs_btree_remove(fsfs_mount_t *m, uint64_t dino, char *name) {
+int fsfs_btree_remove(struct super_block *sb, __u64 dino, char *name) {
+  struct fsfs_sb_info *sbi = FSFS_SB(sb);
   fsfs_inode_t *d;
   fsfs_dirent_t *arr;
   int n;
   int i;
   int f = -1;
-  if (!m || !name) return -1;
+  if (!name) return -1;
   if (dino >= FSFS_MAX_INODES) return -1;
-  d = &m->inodes[dino];
+  d = &sbi->inodes[dino];
   if (d->ino == 0 || !d->is_dir) return -1;
   arr = (fsfs_dirent_t *)d->inline_buf;
   n = d->size / sizeof(fsfs_dirent_t);
@@ -62,16 +70,17 @@ int fsfs_btree_remove(fsfs_mount_t *m, uint64_t dino, char *name) {
   d->seq++;
   return 0;
 }
-int fsfs_btree_lookup(fsfs_mount_t *m, uint64_t dino, char *name, uint64_t *child, uint8_t *type) {
+int fsfs_btree_lookup(struct super_block *sb, __u64 dino, char *name, __u64 *child, __u8 *type) {
+  struct fsfs_sb_info *sbi = FSFS_SB(sb);
   fsfs_inode_t *d;
   fsfs_dirent_t *arr;
   int n;
   int lo = 0;
   int hi = 0;
   int i;
-  if (!m || !name) return -1;
+  if (!name) return -1;
   if (dino >= FSFS_MAX_INODES) return -1;
-  d = &m->inodes[dino];
+  d = &sbi->inodes[dino];
   if (d->ino == 0 || !d->is_dir) return -1;
   arr = (fsfs_dirent_t *)d->inline_buf;
   n = d->size / sizeof(fsfs_dirent_t);
@@ -96,13 +105,14 @@ int fsfs_btree_lookup(fsfs_mount_t *m, uint64_t dino, char *name, uint64_t *chil
   }
   return -1;
 }
-int fsfs_btree_list(fsfs_mount_t *m, uint64_t dino, fsfs_dirent_t *out, int max, int *got) {
+int fsfs_btree_list(struct super_block *sb, __u64 dino, fsfs_dirent_t *out, int max, int *got) {
+  struct fsfs_sb_info *sbi = FSFS_SB(sb);
   fsfs_inode_t *d;
   int n;
   int i;
-  if (!m || !out || !got) return -1;
+  if (!out || !got) return -1;
   if (dino >= FSFS_MAX_INODES) return -1;
-  d = &m->inodes[dino];
+  d = &sbi->inodes[dino];
   if (d->ino == 0 || !d->is_dir) return -1;
   n = d->size / sizeof(fsfs_dirent_t);
   if (n > max) n = max;
@@ -110,3 +120,4 @@ int fsfs_btree_list(fsfs_mount_t *m, uint64_t dino, fsfs_dirent_t *out, int max,
   *got = n;
   return 0;
 }
+#endif

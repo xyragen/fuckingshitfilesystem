@@ -8,6 +8,8 @@ Run make to compile. The build requires fuse3, zlib, lz4, zstd, openssl, and uui
 
 Two binaries are produced. The first, mkfs.fsfs, formats a device or an image file. The second, mount.fsfs, mounts a filesystem.
 
+All build output goes to build. Kernel objects land in build/obj, the module and tools land in build. The source tree stays clean. Kbuild still writes small .cmd bookkeeping files next to sources during the compile, those are ignored.
+
 ## Usage
 
 To format a disk:

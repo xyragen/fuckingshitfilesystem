@@ -1,8 +1,13 @@
 #include "fsfs.h"
+#ifdef __KERNEL__
+#include <linux/string.h>
+#else
 #include <string.h>
+#endif
+extern uint32_t fsfs_crc32c_asm(const void *p, size_t n);
 static uint32_t g_tab[256];
 static int g_init = 0;
-static void lazy_init() {
+static void lazy_init(void) {
   int i, j;
   uint32_t c;
   if (g_init) return;
@@ -16,12 +21,17 @@ static void lazy_init() {
   }
   g_init = 1;
 }
+uint32_t fsfs_crc32c_fast(const void *p, size_t n) {
+  if (!p && n) return 0;
+  return fsfs_crc32c_asm(p, n);
+}
 uint32_t fsfs_crc32c(void *p, size_t n) {
   uint8_t *b = (uint8_t *)p;
   uint32_t c = 0xFFFFFFFFU;
   size_t k = 0;
-  lazy_init();
   if (!p && n) return 0;
+  if (n >= 64) return fsfs_crc32c_asm(p, n);
+  lazy_init();
   for (k = 0; k < n; k++)
     c = g_tab[(c ^ b[k]) & 0xFF] ^ (c >> 8);
   return c ^ 0xFFFFFFFFU;
